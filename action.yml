@@ -1,0 +1,144 @@
+# squirrelscan audit — GitHub Action
+#
+# Composite action: installs the `squirrel` CLI, runs an audit, and gates the
+# build via `--fail-on` (exit 2 = a threshold tripped). Deterministic audits
+# run with no auth; pass `token` (a SQUIRREL_API_TOKEN) to add cloud enrichment.
+#
+# This repo is the published mirror referenced as `squirrelscan/audit-action@v1`.
+# The canonical source is maintained in the squirrelscan monorepo — send changes
+# upstream there; this copy is synced on release.
+name: "squirrelscan audit"
+description: "Run a squirrelscan website audit in CI and fail the build on regressions"
+author: "squirrelscan"
+branding:
+  icon: "check-circle"
+  color: "orange"
+
+inputs:
+  url:
+    description: "URL to audit"
+    required: true
+  fail-on:
+    description: "Threshold expression(s) that fail the build, e.g. 'score<90,severity>=error' (comma-separated)"
+    required: false
+    default: ""
+  token:
+    description: "SQUIRREL_API_TOKEN for cloud enrichment (optional — deterministic audit runs without it)"
+    required: false
+    default: ""
+  format:
+    description: "Report output format (console, text, json, html, markdown, xml, llm)"
+    required: false
+    default: "json"
+  output:
+    description: "Report output file path (match the extension to `format`, e.g. .json/.html)"
+    required: false
+    default: "squirrel-report.json"
+  max-pages:
+    description: "Maximum pages to crawl"
+    required: false
+    default: ""
+  version:
+    description: "squirrel CLI version to install for reproducible CI (e.g. v0.0.46). Default: latest stable."
+    required: false
+    default: "latest"
+  args:
+    description: "Extra raw arguments appended to the audit command (word-split; trusted input only — never pass untrusted PR data here)"
+    required: false
+    default: ""
+  github-token:
+    description: "Token used to post a PR summary comment (optional; pass the workflow's GITHUB_TOKEN secret)"
+    required: false
+    default: ""
+
+outputs:
+  report:
+    description: "Path to the generated report file"
+    value: ${{ steps.audit.outputs.report }}
+  exit-code:
+    description: "squirrel audit exit code (0 = pass, 2 = a --fail-on threshold tripped)"
+    value: ${{ steps.audit.outputs.exit-code }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install squirrel CLI
+      shell: bash
+      env:
+        # The installer reads SQUIRREL_VERSION to pin a release ("latest" → unset).
+        SQ_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if [ -n "$SQ_VERSION" ] && [ "$SQ_VERSION" != "latest" ]; then
+          export SQUIRREL_VERSION="$SQ_VERSION"
+        fi
+        # Installer is a bash script (uses `set -o pipefail`) — run it with bash.
+        curl -fsSL https://install.squirrelscan.com | bash
+        # Fail loudly here rather than later with "command not found".
+        test -x "$HOME/.local/bin/squirrel"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Run audit
+      id: audit
+      shell: bash
+      # Inputs are passed via env (never interpolated into the script) to avoid
+      # shell injection from untrusted values.
+      env:
+        SQUIRREL_API_TOKEN: ${{ inputs.token }}
+        SQ_URL: ${{ inputs.url }}
+        SQ_FAIL_ON: ${{ inputs.fail-on }}
+        SQ_FORMAT: ${{ inputs.format }}
+        SQ_OUTPUT: ${{ inputs.output }}
+        SQ_MAX_PAGES: ${{ inputs.max-pages }}
+        SQ_EXTRA_ARGS: ${{ inputs.args }}
+      run: |
+        set -uo pipefail
+        ARGS=(audit "$SQ_URL" --format "$SQ_FORMAT" --output "$SQ_OUTPUT")
+        [ -n "$SQ_MAX_PAGES" ] && ARGS+=(--max-pages "$SQ_MAX_PAGES")
+        # Split comma-separated thresholds into repeated --fail-on flags so we
+        # don't depend on the CLI's own comma handling.
+        if [ -n "$SQ_FAIL_ON" ]; then
+          IFS=',' read -ra _fail_on <<< "$SQ_FAIL_ON"
+          for expr in "${_fail_on[@]}"; do
+            [ -n "$expr" ] && ARGS+=(--fail-on "$expr")
+          done
+        fi
+        # Escape hatch: word-split extra args intentionally, but disable globbing
+        # so a bare * can't expand against the workspace.
+        if [ -n "$SQ_EXTRA_ARGS" ]; then
+          set -f
+          ARGS+=($SQ_EXTRA_ARGS)
+          set +f
+        fi
+        code=0
+        squirrel "${ARGS[@]}" || code=$?
+        # Multiline-safe write (report path is a user input).
+        {
+          echo "report<<__SQ_EOF__"
+          printf '%s\n' "$SQ_OUTPUT"
+          echo "__SQ_EOF__"
+          echo "exit-code=$code"
+        } >> "$GITHUB_OUTPUT"
+        exit "$code"
+
+    - name: Comment audit summary on PR
+      # Best-effort: only on PRs, only when a token is supplied. Never fails the
+      # job on its own (the gate above already decided the outcome).
+      if: ${{ always() && inputs.github-token != '' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        SQ_OUTPUT: ${{ inputs.output }}
+        SQ_PR: ${{ github.event.pull_request.number }}
+        SQ_GATE: ${{ steps.audit.outputs.exit-code }}
+      run: |
+        SCORE="n/a"
+        if command -v jq >/dev/null 2>&1 && [ -f "$SQ_OUTPUT" ]; then
+          SCORE=$(jq -r '.healthScore.overall // "n/a"' "$SQ_OUTPUT" 2>/dev/null || echo "n/a")
+        fi
+        case "$SQ_GATE" in
+          0) VERDICT="✅ passed" ;;
+          2) VERDICT="❌ a --fail-on threshold tripped" ;;
+          *) VERDICT="⚠️ audit did not complete (exit $SQ_GATE)" ;;
+        esac
+        gh pr comment "$SQ_PR" --body "🐿️ **squirrelscan audit** — health score: **$SCORE/100** · gate: $VERDICT (see the workflow logs for details)." || true

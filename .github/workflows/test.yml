@@ -1,0 +1,28 @@
+name: Test action
+
+# Smoke-test the action end-to-end: install the CLI, audit a stable public
+# site, exercise --fail-on parsing with a threshold that can never trip.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: audit
+        uses: ./
+        with:
+          url: https://example.com
+          max-pages: "1"
+          fail-on: "score<0" # score is 0–100, so this never trips → exit 0
+      - name: Assert the gate passed
+        env:
+          EXIT_CODE: ${{ steps.audit.outputs.exit-code }}
+          REPORT: ${{ steps.audit.outputs.report }}
+        run: |
+          test "$EXIT_CODE" = "0"
+          test -f "$REPORT"
