@@ -73,10 +73,14 @@ runs:
           export SQUIRREL_VERSION="$SQ_VERSION"
         fi
         # Installer is a bash script (uses `set -o pipefail`) — run it with bash.
+        # It installs into the first writable dir on PATH (/usr/local/bin on
+        # GitHub-hosted runners, else ~/.local/bin), so don't assume a fixed path.
         curl -fsSL https://squirrelscan.com/install | bash
-        # Fail loudly here rather than later with "command not found".
-        test -x "$HOME/.local/bin/squirrel"
+        # /usr/local/bin is already on PATH; add the user-local fallback for later
+        # steps, then fail loudly now rather than later with "command not found".
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/.local/bin:$PATH"
+        command -v squirrel >/dev/null || { echo "::error::squirrel not on PATH after install"; exit 1; }
 
     - name: Run audit
       id: audit
