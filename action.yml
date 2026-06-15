@@ -73,7 +73,7 @@ runs:
           export SQUIRREL_VERSION="$SQ_VERSION"
         fi
         # Installer is a bash script (uses `set -o pipefail`) — run it with bash.
-        curl -fsSL https://install.squirrelscan.com | bash
+        curl -fsSL https://squirrelscan.com/install | bash
         # Fail loudly here rather than later with "command not found".
         test -x "$HOME/.local/bin/squirrel"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
